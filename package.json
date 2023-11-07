@@ -1,0 +1,18 @@
+{
+  "name": "rbsee",
+  "version": "0.1.0",
+  "description": "A small tool for bringing certain financial records into view.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "RBSEE_PROXY=http://127.0.0.1:8081 RBSEE_URL=$RBSEE_PROXY node src/main.js",
+    "prod": "node src/main.js",
+    "mock:up": "node scripts/mock/up.js",
+    "mock:down": "node scripts/mock/down.js",
+    "mock:status": "node scripts/mock/status.js",
+    "tree": "tree -I node_modules"
+  },
+  "devDependencies": {
+    "playwright": "^1.57.0"
+  }
+}
