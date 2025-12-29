@@ -1,4 +1,7 @@
 # rbsee
+
+> :warning: **Work in Progress**: This project is currently under development.
+
 A small tool for bringing certain financial records into view.
 
 ## Overview
