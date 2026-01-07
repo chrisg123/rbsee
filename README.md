@@ -27,6 +27,11 @@ Run automation in dev mode:
 npm run dev
 ```
 
+Run automation in dev mode with visible browser:
+```sh
+RBSEE_HEADLESS=0 npm run dev
+```
+
 Stop the proxy server:
 ```sh
 npm run mock:down
