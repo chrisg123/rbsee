@@ -1,11 +1,14 @@
 import os from "os";
 import path from "path";
 import { chromium } from "playwright";
+import { pathToFileURL } from "url";
+import fs from "fs";
 
 (async () => {
-  const { RBSEE_URL, RBSEE_PROXY, RBSEE_HEADLESS, RBSEE_USERNAME, RBSEE_PASSWORD } = process.env;
-  const pvqConfig = loadPvqFromEnv();
-  const pvqMap = buildPvqMap(pvqConfig);
+  const { RBSEE_URL, RBSEE_PROXY, RBSEE_HEADLESS, RBSEE_SECRET_PROVIDER } = process.env;
+
+  const providerPath = resolveProviderPath(RBSEE_SECRET_PROVIDER);
+  const secretProvider = await loadSecretProvider(providerPath);
 
   if (!RBSEE_URL) {
     throw new Error("RBSEE_URL environment variable is required");
@@ -41,11 +44,7 @@ import { chromium } from "playwright";
 
   await page.goto(url, { waitUntil: "networkidle" });
 
-  await login(page, {
-    username: RBSEE_USERNAME,
-    password: RBSEE_PASSWORD,
-    pvqMap: pvqMap,
-  });
+  await login(page, { secretProvider });
 
   console.log('Waiting for "Account Services" link');
   await page.waitForSelector("#accountServicesLocal", { state: "visible" });
@@ -121,13 +120,19 @@ import { chromium } from "playwright";
   await browser.close();
 })();
 
-async function login(page, { username, password, pvqMap }) {
+async function login(page, { secretProvider }) {
   await maybeDismissCookieBanner(page);
   await page.waitForSelector("#userName", { state: "visible" });
+  const username = await secretProvider.getUsername();
+  if (!username) throw new Error("Secret provider returned empty username");
+
   await page.type("#userName", username, { delay: 20 });
   await page.waitForSelector("#signinNext", { state: "visible" });
   await page.click("#signinNext");
   await page.waitForSelector("#password", { state: "visible" });
+  const password = await secretProvider.getPassword();
+  if (!password) throw new Error("Secret provider returned empty password");
+
   await page.type("#password", password, { delay: 21 });
   await page.waitForSelector("#signinNext", { state: "visible" });
   await page.click("#signinNext");
@@ -136,39 +141,15 @@ async function login(page, { username, password, pvqMap }) {
 
   const questionSelector = 'label[for="pvqQInput"]';
   await page.waitForSelector(questionSelector, { state: "visible" });
-  const questionText = await page.textContent(questionSelector);
-  const question = questionText.trim();
-  const questionNorm = question.toLowerCase();
-  let answer = pvqMap[questionNorm];
+
+  const question = await page.textContent(questionSelector);
+  const answer = await secretProvider.get2faAnswer(question);
+
   if (!answer) {
-    throw new Error(`Unkown PVQ question: ${questionText}`);
+    throw new Error(`Unkown 2FA question: ${question}`);
   }
   await page.type("#pvqQInput", answer, { delay: 82 });
   await page.click('button[data-testid="pvq_continue_button"]');
-}
-
-function loadPvqFromEnv() {
-  const raw = process.env.RBSEE_PVQ_JSON;
-  if (!raw) {
-    throw new Error("RBSEE_PVQ_JSON is not set");
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(`RBSEE_PVQ_JSON is not valid JSON: ${e.message}`);
-  }
-  return parsed;
-}
-
-function buildPvqMap(cfg) {
-  console.log(`cfg: ${cfg}`);
-  const map = {};
-  for (const { text, answer } of cfg.questions || []) {
-    if (!text || !answer) continue;
-    map[text.trim().toLowerCase()] = answer;
-  }
-  return map;
 }
 
 async function maybeDismissCookieBanner(page) {
@@ -205,4 +186,88 @@ async function logFormState(page, label) {
     };
   });
   console.log(`[${label}]`, s);
+}
+
+async function loadSecretProvider(providerPath) {
+  const specifier = providerPath.startsWith("file:")
+    ? providerPath
+    : pathToFileURL(providerPath).href;
+
+  let mod;
+  try {
+    mod = await import(specifier);
+  } catch (e) {
+    throw new Error(`Failed to import secret provider from ${p}: ${e.message}`);
+  }
+
+  const required = ["getUsername", "getPassword", "get2faAnswer"];
+  for (const fn of required) {
+    if (typeof mod[fn] !== "function") {
+      throw new Error(`Secret provider missing required function: ${fn}()`);
+    }
+  }
+  return mod;
+}
+
+function resolveProviderPath(input) {
+  const raw = input ?? path.join(os.homedir(), ".config", "rbsee", "secret-provider.mjs");
+
+  let fsPath;
+  let specifier;
+
+  if (raw.startsWith("file://")) {
+    try {
+      fsPath = new URL(raw).pathname;
+      specifier = raw;
+    } catch {
+      throw new Error("Invalid file:// URL for RBSEE_SECRET_PROVIDER");
+    }
+  } else {
+    if (raw.startsWith("~")) {
+      throw new Error("RBSEE_SECRET_PROVIDER must be an absolute path; '~' is not allowed");
+    }
+
+    if (!path.isAbsolute(raw)) {
+      throw new Error("RBSEE_SECRET_PROVIDER must be an absolute path or file:// URL");
+    }
+
+    fsPath = raw;
+    specifier = pathToFileURL(raw).href;
+  }
+
+  if (!fsPath.endsWith(".mjs")) {
+    throw new Error(
+      "Secret provider must be an ES module with a .mjs extension"
+    );
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(fsPath);
+  } catch {
+    throw new Error(`Secret provider does not exist: ${fsPath}`);
+  }
+
+  if (!stat.isFile()) {
+    throw new Error(`Secret provider is not a regular file: ${fsPath}`);
+  }
+
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error(`Secret provider must be owned by the current user: ${fsPath}`);
+  }
+
+  if ((stat.mode & 0o022) !== 0) {
+    throw new Error(`Secret provider must not be group or world writable: ${fsPath}`);
+  }
+
+  const actualMode = stat.mode & 0o777;
+  const allowed = [0o600];
+
+  if (!allowed.includes(actualMode)) {
+    throw new Error(
+      `Secret provider permissions must be 0600; found ${actualMode.toString(8)}: ${fsPath}`,
+    );
+  }
+
+  return specifier;
 }
