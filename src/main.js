@@ -95,16 +95,15 @@ import fs from "fs";
     { timeout: 10000 },
   );
 
-  let download;
-
   await page.waitForFunction(() => document.title !== "", { timeout: 5000 });
 
   await logFormState(page, "before first click");
 
-  [download] = await Promise.all([
-    page.waitForEvent("download", { timeout: 3000 }),
-    continueBtn.click(),
-  ]);
+  const downloadPromise = page.waitForEvent("download", { timeout: 30000 })
+
+  await continueBtn.click();
+
+  const download = await downloadPromise;
 
   const suggestedName = download.suggestedFilename();
   const finalPath = path.join(downloadsPath, suggestedName);
